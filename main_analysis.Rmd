@@ -1,0 +1,475 @@
+---
+title: "Transition from suicidal ideation to first suicide attempt: main analysis"
+output: html_document
+---
+
+This script contains the main regression analyses and multiple-testing corrections.
+It assumes that the cleaned, multiply imputed follow-up dataset and factor-level
+objects are already available. 
+Data preparation, local file paths and spreadsheet/table exports are excluded.
+The original model specifications and statistical calculations are retained.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1. Packages and required inputs
+
+```{r packages-and-inputs}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(survey)
+})
+options(survey.lonely.psu = "adjust")
+
+required_objects <- c("data_fu", "m_imp", "lev_country", "lev_month", "lev_strata")
+missing_objects <- required_objects[
+  !vapply(required_objects, exists, logical(1), inherits = TRUE)
+]
+if (length(missing_objects)) {
+  stop("Load the prepared analysis inputs first: ", paste(missing_objects, collapse = ", "))
+}
+```
+
+## 2. Define predictors and model formulas
+
+Code object names retain their original numbering. Manuscript Models 1, 2 and 3 correspond to `m3`, `biv_results[["md_cat"]]` and `m5_num`, respectively. Additional candidate models are retained for the original model comparisons.
+
+```{r formulas}
+md_vars <- c(
+  "T0_MDD_12m", "T0_GAD_12m", "T0_BP_A_12m", "T0_PTSD_12m",
+  "T0_PD_12m", "T0_Drug_12m_CIDI_or_DUDIT",
+  "T0_Alc_abuse_dep_12M", "T0_ADHD_6M"
+)
+
+fml_m1 <- T1_suic_attempt_12M ~
+  Year_cat_dicho + f_month12 + country +
+  female + lgbtq + f_ParEdu_college + T0_Age_z
+
+fml_m3 <- T1_suic_attempt_12M ~
+  Year_cat_dicho + f_month12 + country +
+  female + lgbtq + f_ParEdu_college + T0_Age_z +
+  LT_suic_idea_aoo_z + T0_LT_suic_idea_y_z + T0_Ideat_NumDayWrst_z +
+  T0_Ideat_LongLast_z + ideation_control_z + ideation_risk_z +
+  T0_suic_ideat_12m_m_z + T0_suic_plan_12M
+
+fml_m4 <- T1_suic_attempt_12M ~
+  Year_cat_dicho + f_month12 + country +
+  female + lgbtq + f_ParEdu_college + T0_Age_z +
+  T0_MDD_12m + T0_GAD_12m + T0_BP_A_12m + T0_PTSD_12m + T0_PD_12m +
+  T0_Drug_12m_CIDI_or_DUDIT + T0_Alc_abuse_dep_12M + T0_ADHD_6M + md_cat_ref1
+
+fml_m5 <- T1_suic_attempt_12M ~
+  Year_cat_dicho + f_month12 + country +
+  female + lgbtq + f_ParEdu_college + T0_Age_z +
+  T0_MDD_12m + T0_GAD_12m + T0_BP_A_12m + T0_PTSD_12m + T0_PD_12m +
+  T0_Drug_12m_CIDI_or_DUDIT + T0_Alc_abuse_dep_12M + T0_ADHD_6M + md_2 + md_3plus +
+  LT_suic_idea_aoo_z + T0_LT_suic_idea_y_z + T0_Ideat_NumDayWrst_z +
+  T0_Ideat_LongLast_z + ideation_control_z + ideation_risk_z +
+  T0_suic_ideat_12m_m_z + T0_suic_plan_12M
+
+fml_s4_type <- T1_suic_attempt_12M ~
+  Year_cat_dicho + f_month12 + country +
+  female + lgbtq + f_ParEdu_college + T0_Age_z +
+  LT_suic_idea_aoo_z + T0_LT_suic_idea_y_z + T0_Ideat_NumDayWrst_z +
+  T0_Ideat_LongLast_z + ideation_control_z + ideation_risk_z +
+  T0_suic_ideat_12m_m_z + T0_suic_plan_12M +
+  T0_MDD_12m + T0_GAD_12m + T0_BP_A_12m + T0_PTSD_12m + T0_PD_12m +
+  T0_Drug_12m_CIDI_or_DUDIT + T0_Alc_abuse_dep_12M + T0_ADHD_6M
+
+fml_s4_num <- T1_suic_attempt_12M ~
+  Year_cat_dicho + f_month12 + country +
+  female + lgbtq + f_ParEdu_college + T0_Age_z +
+  LT_suic_idea_aoo_z + T0_LT_suic_idea_y_z + T0_Ideat_NumDayWrst_z +
+  T0_Ideat_LongLast_z + ideation_control_z + ideation_risk_z +
+  T0_suic_ideat_12m_m_z + T0_suic_plan_12M +
+  md_cat
+```
+
+## 3. Fit a survey-weighted model within one imputation
+
+Models use a quasipoisson family with a log link, follow-up weights, university/school clusters (`strata`) and country strata. Warnings and failed fits are recorded.
+
+```{r fit-one-imputation}
+fit_one_imp <- function(dat, formula, imp_id){
+
+  warn_msgs <- character(0)
+
+  des <- svydesign(
+    ids = ~strata,
+    strata = ~country,
+    weights = ~followup1_norm_weight,
+    data = dat,
+    nest = TRUE
+  )
+
+  mod <- tryCatch(
+
+    withCallingHandlers(
+      svyglm(
+        formula = formula,
+        design = des,
+        family = quasipoisson(link = "log")
+      ),
+
+      warning = function(w){
+        warn_msgs <<- c(warn_msgs, conditionMessage(w))
+      }
+    ),
+
+    error = function(e) e
+  )
+
+  if (inherits(mod, "error")){
+    log_entry <- data.frame(
+      imputation = imp_id,
+      failed = TRUE,
+      n_warnings = length(warn_msgs) + 1,
+      messages = paste(c(conditionMessage(mod), warn_msgs), collapse = " | "),
+      stringsAsFactors = FALSE
+    )
+
+    return(list(
+      betas = NULL,
+      vcov_mod = NULL,
+      model = NULL,
+      log = log_entry
+    ))
+  }
+
+  log_entry <- data.frame(
+    imputation = imp_id,
+    failed = FALSE,
+    n_warnings = length(warn_msgs),
+    messages = paste(warn_msgs, collapse = " | "),
+    stringsAsFactors = FALSE
+  )
+
+  list(
+    betas = coef(mod),
+    vcov_mod = as.matrix(vcov(mod)),
+    model = mod,
+    log  = log_entry
+  )
+
+}
+```
+
+## 4. Pool estimates using Rubin's rules
+
+The original pooling implementation is retained, including Rubin's original degrees-of-freedom formula. Raw pooled p-values retain full precision for BH correction. Risk ratios and ordinary 95% confidence intervals are not multiplicity-adjusted.
+
+```{r pool-estimates}
+pool_rubin_rr <- function(fits){
+  m <- length(fits)
+
+  pnames <- names(fits[[1]]$betas)
+
+  align_one <- function(f){
+    b <- f$betas
+    v <- f$vcov_mod
+
+    if (!all(pnames %in% names(b))){
+      missing <- setdiff(pnames, names(b))
+      stop("Missing coefficients in an imputation: ", paste(missing, collapse = ", "))
+    }
+
+    if (!all(pnames %in% rownames(v)) || !all(pnames %in% colnames(v))) {
+      stop("vcv mismatch across imputations. check factor levels.")
+    }
+
+    list(
+      b = b[pnames],
+      v = v[pnames, pnames, drop = FALSE]
+    )
+  }
+
+  aligned <- lapply(fits, align_one)
+
+  B_mat <- do.call(rbind, lapply(aligned, `[[`, "b" ))
+
+  Q_bar <- colMeans(B_mat)
+
+  U_bar <- Reduce(`+`, lapply(aligned, `[[`, "v"))/ m
+
+  B <- stats::cov(B_mat)
+
+  T_total <- U_bar + (1 + 1/m) * B
+
+  Udiag <- diag(U_bar)
+
+  Bdiag <- diag(B)
+
+  riv <- (1 + 1 /m) * (Bdiag / Udiag)
+
+  riv[!is.finite(riv)] <- 0
+
+  df_old <- (m-1) * (1 + 1 / riv)^2
+
+  df_old[!is.finite(df_old)] <- 1e6
+
+  fmi <- riv / (1 + riv)
+
+  se_pooled <- sqrt(diag(T_total))
+
+  t_stat <- Q_bar / se_pooled
+
+  p_value <- 2 * stats::pt(-abs(t_stat), df = df_old)
+
+  results <- data.frame(
+    Predictor = pnames,
+    beta      = round(Q_bar, 4),
+    RR        = round(exp(Q_bar), 3),
+    CI_low    = round(exp(Q_bar - stats::qt(0.975, df = df_old) * se_pooled), 3),
+    CI_high   = round(exp(Q_bar + stats::qt(0.975, df = df_old) * se_pooled), 3),
+    SE_pooled = round(se_pooled, 4),
+    df_old    = round(df_old, 1),
+    p         = p_value,
+    riv       = round(riv, 3),
+    fmi       = round(fmi, 3),
+    stringsAsFactors = FALSE
+  )
+  rownames(results) <- NULL
+
+  list(
+    results = results,
+    Q_bar = Q_bar,
+    T_total = T_total,
+    U_bar = U_bar,
+    B = B,
+    df_old = df_old,
+    riv = riv,
+    fmi = fmi
+  )
+}
+```
+
+## 5. Run each model across imputations
+
+Eligibility is evaluated within each completed imputation. Coefficients common to all imputations are pooled; dropped coefficients, warnings and failures are logged.
+
+```{r run-imputations}
+run_all_imps <- function(data_all, formula, filter_quos, label){
+  cat("\n================================\n")
+  cat(" ", label, "\n")
+  cat("==================================\n")
+
+    fits <- vector("list", m_imp)
+    fit_logs <- vector("list", m_imp)
+
+    for (i in 1:m_imp){
+     cat(" Imputation", i, "...")
+
+     dat_i <- data_all %>%
+      filter(`_IMPUTATION_` == i) %>%
+      filter(!!!filter_quos) %>%
+      mutate(
+        country = factor(country, levels = lev_country),
+        f_month12 = factor(f_month12, levels = lev_month),
+        strata = factor(strata, levels = lev_strata)
+      )
+
+    if (i == 1) cat( "N =", nrow(dat_i), "...")
+
+    fits[[i]] <- fit_one_imp(dat_i, formula, imp_id = i )
+
+    fit_logs[[i]] <- fits[[i]]$log
+    cat("done\n")
+    }
+    log_df <- bind_rows(fit_logs)
+
+  failed_fit <- vapply(fits, function(x) is.null(x$model), logical(1))
+  if (any(failed_fit)){
+    cat("\nFailed imputations detected:\n")
+    print(log_df %>% filter(failed), row.names = FALSE)
+    stop("At least one imputation failed completely.")
+  }
+
+  n_warn <- sum(log_df$n_warnings > 0, na.rm = TRUE)
+  cat("\nwarnings in", n_warn, "of", m_imp, "imputations. \n")
+  if(n_warn >0){
+    print(log_df %>% filter(n_warnings > 0), row.names= FALSE)
+  }
+
+  common_coefs <- Reduce(intersect, lapply(fits, function(x) names(x$betas)))
+
+  dropped <- setdiff(names(fits[[1]]$betas), common_coefs)
+  log_df$dropped_coefs <- paste(dropped, collapse = ", ")
+  log_df$n_dropped <- length(dropped)
+  if (length(dropped) > 0)
+    cat("\nDropped from pooling for", dropped, "\n")
+
+  fits_aligned <- lapply(fits, function(f){
+    f$betas <- f$betas[common_coefs]
+    f$vcov_mod <- f$vcov_mod[common_coefs, common_coefs, drop = FALSE]
+    f
+  })
+
+  finite_coef <- vapply(fits_aligned, function(x) all(is.finite(x$betas)), logical(1))
+  finite_vcov <- vapply(fits_aligned, function(x) all(is.finite(x$vcov_mod)), logical(1))
+
+  if(!all(finite_coef)) stop("non-finite beta detected")
+  if(!all(finite_vcov)) stop("non-finite VCV entries detected")
+
+  pooled <- pool_rubin_rr(fits_aligned)
+
+  cat("\nPooled results (df_old):\n")
+  print(pooled$results %>%
+          filter(!Predictor %in% c("(Intercept)") &
+                 !startsWith(Predictor, "country")),
+        row.names = FALSE)
+
+  list(
+     results = pooled$results %>%
+          filter(!Predictor %in% c("(Intercept)") &
+                 !startsWith(Predictor, "country")),
+     pooled = pooled,
+     fits = fits,
+     log = log_df
+  )
+
+}
+```
+
+## 6. Fit the fixed and candidate models
+
+The risk set comprises follow-up participants with lifetime ideation and no lifetime attempt at baseline. The outcome is a 12-month suicide attempt at follow-up. Counts may vary across imputations.
+
+```{r fit-fixed-models}
+filter_main <- quos(T0_LT_suic_idea == 1, T0_LT_suic_attempt == 0)
+
+m1 <- run_all_imps(data_fu, fml_m1, filter_main, "MODEL 1 - Sociodemographic")
+m3 <- run_all_imps(data_fu, fml_m3, filter_main, "MODEL 3 - STB cluster")
+m4 <- run_all_imps(data_fu, fml_m4, filter_main, "MODEL 4 - MDs")
+m5 <- run_all_imps(data_fu, fml_m5, filter_main, "MODEL 5 - Full")
+
+m5_type <- run_all_imps(data_fu, fml_s4_type, filter_main, "MODEL 5 - Type only")
+m5_num  <- run_all_imps(data_fu, fml_s4_num,  filter_main, "MODEL 5 - Number only")
+```
+
+## 7. Fit adjusted bivariable models and apply BH correction
+
+The four sociodemographic coefficients come from their joint model. Each disorder or STB characteristic is then tested in a separate model adjusted for all four sociodemographics, COVID-19 period, assessment timing and country. Disorder count is fitted as a categorical predictor. Four separate BH families contain 23, 12, 7 and 15 tests; see the README for their definitions.
+
+```{r bivariable-and-bh}
+rhs_controls <- "Year_cat_dicho + f_month12 + country + female + lgbtq + f_ParEdu_college + T0_Age_z"
+
+stb_vars <- c(
+  "LT_suic_idea_aoo_z", "T0_LT_suic_idea_y_z", "T0_Ideat_NumDayWrst_z",
+  "T0_Ideat_LongLast_z", "ideation_control_z", "ideation_risk_z",
+  "T0_suic_ideat_12m_m_z", "T0_suic_plan_12M"
+)
+
+bh_vars <- c(md_vars, stb_vars)
+
+biv_results <- list()
+
+biv_results[["md_cat"]] <- run_all_imps(
+  data_fu,
+  as.formula(paste("T1_suic_attempt_12M ~", rhs_controls, "+ md_cat")),
+  filter_main, "MODEL 2 - md_cat"
+)
+
+for (v in bh_vars) {
+  biv_results[[v]] <- run_all_imps(
+    data_fu,
+    as.formula(paste("T1_suic_attempt_12M ~", rhs_controls, "+", v)),
+    filter_main, paste("MODEL 2 -", v)
+  )
+}
+
+get_bh_rows <- function(results, predictors) {
+  map_dfr(predictors, function(v) {
+    hit <- results %>%
+      filter(Predictor == v | Predictor == paste0(v, "1")) %>%
+      select(Predictor, RR, CI_low, CI_high, p)
+
+    if (nrow(hit) != 1L || any(!is.finite(hit$p)) ||
+        any(hit$p < 0 | hit$p > 1)) {
+      stop("Expected one valid pooled p-value for: ", v)
+    }
+
+    hit %>% mutate(Variable = v, .before = 1)
+  })
+}
+
+soc_vars <- c("T0_Age_z", "f_ParEdu_college", "lgbtq", "female")
+md_count_coefs <- c("md_cat1", "md_cat2", "md_cat3+")
+
+bh_biv_soc <- get_bh_rows(m1$results, soc_vars) %>%
+  mutate(Source = "sociodemographic")
+
+bh_biv_individual <- map_dfr(bh_vars, function(v) {
+  get_bh_rows(biv_results[[v]]$results, v) %>%
+    mutate(Source = v)
+})
+
+bh_biv_count <- get_bh_rows(
+  biv_results[["md_cat"]]$results, md_count_coefs
+) %>%
+  mutate(Source = "md_cat")
+
+bh_bivariate <- bind_rows(bh_biv_soc, bh_biv_individual, bh_biv_count)
+stopifnot(
+  nrow(bh_bivariate) == 23L,
+  !anyDuplicated(bh_bivariate$Predictor),
+  all(is.finite(bh_bivariate$p))
+)
+bh_bivariate <- bh_bivariate %>%
+  mutate(p_adj = p.adjust(p, method = "BH"))
+
+adjust_model_bh <- function(results, predictors, expected_n) {
+  out <- get_bh_rows(results, predictors)
+  stopifnot(
+    nrow(out) == expected_n,
+    !anyDuplicated(out$Predictor),
+    all(is.finite(out$p))
+  )
+  out %>% mutate(p_adj = p.adjust(p, method = "BH"))
+}
+
+bh_multivariable_1 <- adjust_model_bh(
+  m3$results, c(soc_vars, stb_vars), 12L
+)
+
+bh_multivariable_2 <- adjust_model_bh(
+  biv_results[["md_cat"]]$results, c(soc_vars, md_count_coefs), 7L
+)
+
+bh_multivariable_3 <- adjust_model_bh(
+  m5_num$results, c(soc_vars, stb_vars, md_count_coefs), 15L
+)
+
+attach_bh <- function(results, bh_table) {
+  stopifnot(!anyDuplicated(bh_table$Predictor))
+  results %>%
+    select(-any_of("p_adj")) %>%
+    left_join(bh_table %>% select(Predictor, p_adj), by = "Predictor")
+}
+
+model2_bh_results <- attach_bh(
+  biv_results[["md_cat"]]$results, bh_multivariable_2
+)
+soc_biv_bh_results <- attach_bh(
+  m1$results, bh_bivariate %>% filter(Source == "sociodemographic")
+)
+for (v in names(biv_results)) {
+  biv_results[[v]]$results <- attach_bh(
+    biv_results[[v]]$results,
+    bh_bivariate %>% filter(Source == v)
+  )
+}
+```
+
+## Results
+
+Results remain in the R session. The objects below contain the focal coefficients,
+ordinary confidence intervals, raw p-values and BH-adjusted p-values for the four
+manuscript analysis families. No files are written by this script.
+
+```{r inspect-bh-results}
+bh_bivariate
+bh_multivariable_1
+bh_multivariable_2
+bh_multivariable_3
+```
