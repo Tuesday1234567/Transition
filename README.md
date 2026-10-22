@@ -1,4 +1,4 @@
-# Suicidal ideation-to-attempt transition: main analysis
+# First lifetime transition from suicidal ideation to attempt after university entrance: Findings from the World Mental Health International College Student Initiative: main analysis
 
 `main_analysis.Rmd` contains the main regression analyses for transition from lifetime suicidal ideation at baseline to a first suicide attempt during 12-month follow-up.
 
